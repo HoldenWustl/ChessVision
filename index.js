@@ -4,8 +4,10 @@ puppeteer.use(StealthPlugin());
 const { spawn } = require("child_process");
 const path = require("path");
 const { Chess } = require("chess.js");
+
 const ENGINE_PATH = path.join(__dirname, "engine", "lc0.exe");
 const MAIA_NET_PATH = path.resolve(__dirname, "engine", "1500.pb");
+
 function buildPieceOnlyFen(pieces) {
   const board = Array.from({ length: 8 }, () => Array(8).fill("."));
   for (const p of pieces) {
@@ -35,6 +37,7 @@ function buildPieceOnlyFen(pieces) {
     })
     .join("/");
 }
+
 async function getPieces(page) {
   const pieces = await page.$$eval(".piece", nodes =>
     nodes.map(n => {
@@ -47,13 +50,16 @@ async function getPieces(page) {
   );
   return { pieces, numPieces: pieces.length };
 }
+
 let currentEngine = null; 
 let currentSearch = null; 
+
 async function initEngine() {
   currentEngine = spawn(ENGINE_PATH);
   let buffer = "";
   let readyResolve = null;
   const readyPromise = new Promise((res) => { readyResolve = res; });
+  
   currentEngine.stdout.on("data", (data) => {
     buffer += data.toString();
     const lines = buffer.split(/\r?\n/);
@@ -78,9 +84,11 @@ async function initEngine() {
       }
     }
   });
+  
   currentEngine.stderr.on("data", (data) => {
     console.error(`Engine STDERR: ${data}`);
   });
+  
   currentEngine.on("close", (code) => {
     console.log(`Engine closed with code ${code}`);
     currentEngine = null;
@@ -89,6 +97,7 @@ async function initEngine() {
       currentSearch = null;
     }
   });
+  
   currentEngine.on("error", (err) => {
     console.error("Engine error:", err);
     currentEngine = null;
@@ -97,12 +106,15 @@ async function initEngine() {
       currentSearch = null;
     }
   });
+  
   currentEngine.stdin.write("uci\n");
   currentEngine.stdin.write(`setoption name Backend value blas\n`);
   currentEngine.stdin.write(`setoption name Threads value 8\n`);
   currentEngine.stdin.write(`setoption name WeightsFile value ${MAIA_NET_PATH}\n`);
   currentEngine.stdin.write("isready\n");
+  
   await readyPromise;
+  
   await new Promise((resolve) => {
     const listener = (data) => {
       if (data.toString().includes("bestmove")) {
@@ -116,6 +128,7 @@ async function initEngine() {
   });
   console.log("Engine initialized and ready.");
 }
+
 function algebraicToSquareNum(alg) {
   const files = "abcdefgh";
   const fileChar = alg[0];
@@ -124,33 +137,90 @@ function algebraicToSquareNum(alg) {
   const rankNum = parseInt(rankChar, 10);
   return `${fileNum}${rankNum}`; 
 }
+
 function squareNumToAlgebraic(numStr) {
   const files = "abcdefgh";
   const fileNum = parseInt(numStr[0], 10);
   const rankNum = parseInt(numStr[1], 10);
   return `${files[fileNum - 1]}${rankNum}`;
 }
+
+// Global Mouse Tracking for Smooth Curves and Fidgeting
+let lastMouseX = 400; 
+let lastMouseY = 400;
+
+function getQuadraticCurve(startX, startY, endX, endY, steps = 10) {
+  const path = [];
+  const dx = endX - startX;
+  const dy = endY - startY;
+  const bow = (Math.random() - 0.5) * 0.3; 
+  const ctrlX = startX + dx / 2 - dy * bow;
+  const ctrlY = startY + dy / 2 + dx * bow;
+
+  for (let i = 1; i <= steps; i++) {
+    let t = i / steps;
+    const easedT = t * (2 - t); 
+    const x = Math.pow(1 - easedT, 2) * startX + 2 * (1 - easedT) * easedT * ctrlX + Math.pow(easedT, 2) * endX;
+    const y = Math.pow(1 - easedT, 2) * startY + 2 * (1 - easedT) * easedT * ctrlY + Math.pow(easedT, 2) * endY;
+    path.push({ x, y });
+  }
+  return path;
+}
+
+async function moveMouseSmoothly(page, startX, startY, endX, endY, steps) {
+  const curve = getQuadraticCurve(startX, startY, endX, endY, steps);
+  for (const point of curve) {
+    await page.mouse.move(point.x, point.y);
+  }
+  lastMouseX = endX;
+  lastMouseY = endY;
+}
+
+async function humanFidget(page) {
+  if (Math.random() > 0.3) return;
+
+  const driftX = lastMouseX + (Math.random() * 100 - 50);
+  const driftY = lastMouseY + (Math.random() * 100 - 50);
+  
+  const safeX = Math.max(100, Math.min(800, driftX));
+  const safeY = Math.max(100, Math.min(800, driftY));
+
+  await moveMouseSmoothly(page, lastMouseX, lastMouseY, safeX, safeY, 15);
+  
+  if (Math.random() < 0.1) {
+    await page.mouse.down();
+    await new Promise(r => setTimeout(r, 20 + Math.random() * 50));
+    await page.mouse.up();
+  }
+}
+
 async function makeMove(page, move, isWhiteToMove) {
   try {
     const fromAlg = move.slice(0, 2);
     const toAlg = move.slice(2, 4);
     const fromSqNum = algebraicToSquareNum(fromAlg);
     const toSqNum = algebraicToSquareNum(toAlg);
+    
     const fromSelector = `.piece.square-${fromSqNum}`;
     const toSelector = [
       `.piece.square-${toSqNum}`,
       `.hint.square-${toSqNum}`,
       `.capture-square.square-${toSqNum}`
     ].join(', ');
+    
     console.log(`🤖 Making move: ${move}`);
+    
     const fromElement = await page.waitForSelector(fromSelector, { visible: true, timeout: 3000 });
     const fromBox = await fromElement.boundingBox();
     const fromX = fromBox.x + (fromBox.width / 2) + (Math.random() * 10 - 5);
     const fromY = fromBox.y + (fromBox.height / 2) + (Math.random() * 10 - 5);
-    await page.mouse.move(fromX, fromY, { steps: 15 });
+    
+    await moveMouseSmoothly(page, lastMouseX, lastMouseY, fromX, fromY, 8);
     await page.mouse.down();
+    
     try {
-      await new Promise(r => setTimeout(r, 50 + Math.random() * 100));
+      await new Promise(r => setTimeout(r, 30 + Math.random() * 60));
+      
       let toElement = null;
       for (let i = 0; i < 3 && !toElement; i++) {
         try {
@@ -158,32 +228,43 @@ async function makeMove(page, move, isWhiteToMove) {
         } catch { }
       }
       if (!toElement) throw new Error(`Target square not found for ${move}`);
+      
       const toBox = await toElement.boundingBox();
       const toX = toBox.x + (toBox.width / 2) + (Math.random() * 10 - 5);
       const toY = toBox.y + (toBox.height / 2) + (Math.random() * 10 - 5);
-      await page.mouse.move(toX, toY, { steps: 10 });
-      await new Promise(r => setTimeout(r, 50 + Math.random() * 100));
+      
+      await moveMouseSmoothly(page, fromX, fromY, toX, toY, 12);
+      
+      await new Promise(r => setTimeout(r, 20 + Math.random() * 50));
     } finally {
       await page.mouse.up();
     }
+    
     if (move.length === 5) {
       const promotionPiece = move.slice(4, 5);
       const color = isWhiteToMove ? 'w' : 'b';
       const promoSelector = `.promotion-piece.${color}${promotionPiece}`;
       const promoElement = await page.waitForSelector(promoSelector, { visible: true, timeout: 5000 });
       await new Promise(r => setTimeout(r, 100));
+      
+      const promoBox = await promoElement.boundingBox();
+      lastMouseX = promoBox.x + promoBox.width / 2;
+      lastMouseY = promoBox.y + promoBox.height / 2;
+      
       await promoElement.click();
     }
   } catch (e) {
     throw new Error(`Error making move ${move}: ${e.message}`);
   }
 }
+
 function randomDelayBiased(minMs = 500, maxMs = 5000, bias = 3.5) {
   const u = Math.random(); 
   const v = Math.pow(u, bias); 
   const ms = Math.round(minMs + (maxMs - minMs) * v);
   return new Promise(resolve => setTimeout(resolve, ms));
 }
+
 async function getBestMove(fenWithTurn, maxDepth) {
   if (!currentEngine) throw new Error("Engine not initialized.");
   if (currentSearch) {
@@ -216,13 +297,16 @@ async function getBestMove(fenWithTurn, maxDepth) {
   }, 50);
   return promise;
 }
+
 const STARTING_FEN_PIECES = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
+
 (async () => {
   const url = process.argv[2] || "https://www.chess.com/play/online";
   const browser = await puppeteer.launch({ headless: false, defaultViewport: null });
   const [page] = await browser.pages();
   console.log("Opening:", url);
   await page.goto(url, { waitUntil: "networkidle2" });
+  
   try {
     await page.waitForSelector(".piece", { timeout: 20000 });
     await page.waitForSelector("svg.arrows", { timeout: 10000 });
@@ -231,14 +315,24 @@ const STARTING_FEN_PIECES = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
     return;
   }
   console.log("✅ Board detected. Watching for changes...");
+  
   await initEngine();
   const chess = new Chess();
+  
+  // --- STATE VARIABLES ---
   let needsSyncRetry = false; 
   let syncRetryCount = 0;
   let handlingBoard = false;
+  
+  // NEW: Global Fidget and Turn Tracking Variables
+  let isBotTurn = false; 
+  let lastFidgetTime = Date.now();
+  let nextFidgetDelay = 3000 + Math.random() * 2000;
+
   function getPieceOnlyFen(fullFen) {
     return fullFen.split(' ')[0];
   }
+
   async function handleBoardChange() {
     if (handlingBoard) return;
     handlingBoard = true;
@@ -246,6 +340,7 @@ const STARTING_FEN_PIECES = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
       const { pieces, numPieces } = await getPieces(page);
       const domFenPieces = buildPieceOnlyFen(pieces);
       const internalFenPieces = getPieceOnlyFen(chess.fen());
+      
       // 1. Check if game restarted
       if (domFenPieces === STARTING_FEN_PIECES && internalFenPieces !== STARTING_FEN_PIECES) {
         console.log("♟️ New Game Detected. Resetting internal state.");
@@ -312,13 +407,13 @@ const STARTING_FEN_PIECES = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
           }
           return; 
         }
-      } 
-      else {
+      } else {
         needsSyncRetry = false;
       }
+      
       const currentFen = chess.fen();
-      let isMyTurn = false;
       let timeLeftSec = 0;
+      
       try {
         const { iAmWhite, myTimeStr } = await page.evaluate(() => {
           const board = document.querySelector('wc-chess-board');
@@ -329,7 +424,10 @@ const STARTING_FEN_PIECES = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
             myTimeStr: myClock ? myClock.textContent.trim() : null
           };
         });
-        isMyTurn = (chess.turn() === 'w' && iAmWhite) || (chess.turn() === 'b' && !iAmWhite);
+        
+        // NEW: Update global isBotTurn variable
+        isBotTurn = (chess.turn() === 'w' && iAmWhite) || (chess.turn() === 'b' && !iAmWhite);
+        
         if (myTimeStr) {
           const [min, sec] = myTimeStr.split(":").map(Number);
           timeLeftSec = min * 60 + sec;
@@ -339,7 +437,8 @@ const STARTING_FEN_PIECES = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
           console.error("Turn/Time detection failed:", e.message);
         }
       }
-      if (isMyTurn) {
+      
+      if (isBotTurn) {
         if (chess.isGameOver()) {
           console.log("🏁 Internal state says game is over.");
           return; 
@@ -347,57 +446,53 @@ const STARTING_FEN_PIECES = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
         const maxSearchDepth = 5;
         console.log("FEN:", currentFen);
         console.log(`Analyzing to depth ${maxSearchDepth}...`);
+        
         const finalMove = await getBestMove(currentFen, maxSearchDepth);
         console.log("💡 Engine final move:", finalMove);
         
-       // 1. Zero-overhead context checks (Takes < 1 millisecond)
         const legalMovesCount = chess.moves().length;
         const history = chess.history({ verbose: true });
-        const lastMove = history.length > 0 ? history[history.length - 1] : null;
+        const plyCount = history.length;
+        const lastMove = plyCount > 0 ? history[plyCount - 1] : null;
         
-        // Check if we are recapturing on the exact square the opponent just moved to
         let isRecapture = false;
+        
         if (lastMove && lastMove.flags.includes('c') && finalMove.slice(2, 4) === lastMove.to) {
           isRecapture = true;
         }
 
-        // 2. Your fast, optimized timing logic
         if (timeLeftSec > 0 && timeLeftSec < 20) {
-          // Low time panic
           await randomDelayBiased(50, 150, 4); 
-          
         } else if (timeLeftSec > 0 && timeLeftSec < 60) {
-          // Under a minute
           await randomDelayBiased(100, 800, 4); 
-          
         } else if (legalMovesCount === 1 || isRecapture) {
-          // NEW: Only 1 legal move, or an obvious recapture. Play almost instantly.
           await randomDelayBiased(100, 800, 4);
-          
-        } else {
-          // Normal play based on piece count
-          if (numPieces >= 30) {
-            // Opening (32 total pieces max)
+        } else if (legalMovesCount <= 3) {
+          await randomDelayBiased(500, 2000, 2);
+        }
+        else {
+          if (numPieces >= 31) {
             await randomDelayBiased(200, 2000, 4); 
-            
-          } else if (numPieces >= 10) {
-            // Midgame
-            await randomDelayBiased(500, 7500, 2); 
-            
-          } else {
-            // Endgame / Few options (Your preferred fast endgame speed)
-            await randomDelayBiased(100, 800, 4); 
+          } else if (numPieces >= 27) {
+            await randomDelayBiased(500, 8000, 2); 
+          }
+           else if (numPieces >= 14) {
+            await randomDelayBiased(500, 8000, 0.8); 
+          }  else if (numPieces >= 5) {
+            await randomDelayBiased(500, 3000, 2); 
+          } 
+          else {
+            await randomDelayBiased(200, 1000, 4); 
           }
         }
+        
         const isWhiteToMove = chess.turn() === 'w';
-        // FIX: Removed duplicate makeMove call and properly wrapped in try/catch
         try {
           await makeMove(page, finalMove, isWhiteToMove);
-          // FIX: Instantly sync our internal state so we don't rely on parsing the DOM for our own moves
           chess.move({
-             from: finalMove.slice(0, 2),
-             to: finalMove.slice(2, 4),
-             promotion: finalMove.length === 5 ? finalMove[4] : undefined
+              from: finalMove.slice(0, 2),
+              to: finalMove.slice(2, 4),
+              promotion: finalMove.length === 5 ? finalMove[4] : undefined
           });
           needsSyncRetry = false; 
         } catch (err) {
@@ -413,6 +508,7 @@ const STARTING_FEN_PIECES = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
       handlingBoard = false;
     }
   }
+
   await page.evaluate(() => {
     const board = document.querySelector("wc-chess-board.board");
     if (!board) throw new Error("Board not found");
@@ -433,6 +529,8 @@ const STARTING_FEN_PIECES = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
     window.mutationObserverAttached = true;
   });
   console.log("✅ MutationObserver attached. Waiting for board changes...");
+  
+  // MAIN POLLING LOOP
   setInterval(async () => {
     try {
       const changed = await page.evaluate(() => {
@@ -442,8 +540,18 @@ const STARTING_FEN_PIECES = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
         }
         return false;
       });
+      
       if (changed || needsSyncRetry) {
         await handleBoardChange();
+      } 
+      // NEW: Fidget logic perfectly tucked into the else block
+      else {
+        const now = Date.now();
+        if (!isBotTurn && !handlingBoard && (now - lastFidgetTime > nextFidgetDelay)) {
+          lastFidgetTime = now;
+          nextFidgetDelay = 3000 + Math.random() * 2000; 
+          await humanFidget(page).catch(e => console.log("Fidget skipped:", e.message));
+        }
       }
     } catch (e) {
       if (!e.message.includes("Execution context was destroyed")) {
@@ -451,16 +559,17 @@ const STARTING_FEN_PIECES = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
       }
     }
   }, 40);
+  
   setInterval(async () => {
     try {
       const newGameBtnSelector = '[data-cy="game-over-modal-new-game-button"]';
       const btnVisible = await page.evaluate((sel) => {
         const btn = document.querySelector(sel);
-        // FIX: Make sure the modal is actually visible and not just sitting hidden in the DOM
         if (!btn) return false;
         const style = window.getComputedStyle(btn);
         return style.display !== 'none' && style.visibility !== 'hidden' && btn.offsetHeight > 0;
       }, newGameBtnSelector);
+      
       if (btnVisible) {
         console.log("🏁 Game Over detected! Taking a breath before next game...");
         await new Promise(r => setTimeout(r, 3000 + Math.random() * 3000)); 
@@ -476,6 +585,7 @@ const STARTING_FEN_PIECES = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR";
       }
     }
   }, 2000); 
+  
   page.on("framenavigated", async () => {
     console.log("Page navigated, reattaching MutationObserver...");
     try {
